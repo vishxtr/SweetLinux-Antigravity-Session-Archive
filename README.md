@@ -4,6 +4,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Qualcomm_Snapdragon_732G_(SM7150--AC)-orange.svg)](https://en.wikipedia.org/wiki/Snapdragon)
 [![Target Device](https://img.shields.io/badge/Device-Xiaomi_Redmi_Note_10_Pro_/_Max-red.svg)](https://github.com/vishxtr/SweetLinux)
 [![OS Target](https://img.shields.io/badge/OS-Ubuntu_Touch_(Halium_10_/_CyberNeon_v1.4)-purple.svg)](https://github.com/vishxtr/SweetLinux)
+[![Hardware Reference](https://img.shields.io/badge/Hardware_Reference-Snapdragon_732G_Bible-blueviolet.svg)](https://github.com/vishxtr/Sweet-Hardware-Development-Reference)
 [![Release Verified](https://img.shields.io/badge/Installer_SHA256-40d69899...-brightgreen.svg)](https://github.com/vishxtr/SweetLinux/releases/tag/v1.4.1-amoled-certified)
 
 Welcome to the official **Antigravity Engineering Session Archive** for **SweetLinux** — an advanced port of Ubuntu Touch (Halium 10 / Lomiri / CyberNeon v1.4) to the **Xiaomi Redmi Note 10 Pro / Pro Max** (`sweet` / `sweetin`).
