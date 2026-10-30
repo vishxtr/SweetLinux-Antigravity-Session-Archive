@@ -1,0 +1,11 @@
+[Unit]
+Description=Prevent Sleep of Death and Keep DSI Display Regulators Responsive
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "echo sweet-display > /sys/power/wake_lock 2>/dev/null || true; echo 0 > /sys/power/autosleep 2>/dev/null || true"
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

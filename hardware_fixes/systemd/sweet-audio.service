@@ -1,0 +1,12 @@
+[Unit]
+Description=SweetLinux Stereo Loudspeaker & AW882xx Audio Initialization
+After=pulseaudio.service droid-hal-init.service
+Wants=pulseaudio.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sweet-audio-init
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

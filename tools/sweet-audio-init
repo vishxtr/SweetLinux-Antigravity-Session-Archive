@@ -1,0 +1,12 @@
+#!/bin/sh
+# SweetLinux Stereo Loudspeaker & AW882xx Audio Initialization
+tinymix "aw_dev_0_prof" "Music" 2>/dev/null || true
+tinymix "aw_dev_0_switch" "Enable" 2>/dev/null || true
+tinymix "aw_dev_1_prof" "Music" 2>/dev/null || true
+tinymix "aw_dev_1_switch" "Enable" 2>/dev/null || true
+tinymix "aw882xx_rx_switch" "Enable" 2>/dev/null || true
+tinymix "RX_BIAS" "1" 2>/dev/null || true
+tinymix "SLIM_0_RX Channels" "Two" 2>/dev/null || true
+tinymix "PRI_MI2S_RX_DL_HL Switch" "1" 2>/dev/null || true
+su - phablet -c "pactl set-default-sink droid_sink 2>/dev/null || true; pactl set-sink-mute droid_sink 0 2>/dev/null || true; pactl set-sink-volume droid_sink 100% 2>/dev/null || true; pactl set-sink-port droid_sink output-speaker 2>/dev/null || true" 2>/dev/null || true
+exit 0

@@ -1,0 +1,11 @@
+[Unit]
+Description=Ensure RootFS is Read-Write for Terminal Operations
+After=systemd-remount-fs.service local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/mount -o remount,rw /
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

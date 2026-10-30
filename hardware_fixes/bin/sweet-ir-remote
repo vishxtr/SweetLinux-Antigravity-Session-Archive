@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SweetLinux Consumer Infrared (IR) Blaster Controller
+Redmi Note 10 Pro / Pro Max (sweet / sweetin)
+Supports Xiaomi, Samsung, LG, Sony TVs, Air Conditioners, and Custom Remotes.
+"""
+
+import sys
+import os
+import json
+import urllib.request
+import urllib.parse
+import subprocess
+
+API_URL = "http://127.0.0.1:8088/api/ir"
+
+def show_help():
+    print("SweetLinux IR Remote CLI v1.0")
+    print("Usage:")
+    print("  sweet-ir-remote list")
+    print("  sweet-ir-remote send <device> <key>")
+    print("  sweet-ir-remote gui")
+    print("")
+    print("Examples:")
+    print("  sweet-ir-remote send samsung_tv power")
+    print("  sweet-ir-remote send daikin_ac temp_down")
+    print("  sweet-ir-remote send xiaomi_tv vol_up")
+
+def list_devices():
+    try:
+        req = urllib.request.urlopen(API_URL + "/devices", timeout=3)
+        data = json.loads(req.read().decode("utf-8"))
+        print("\n=== Supported IR Remote Devices ===")
+        for dev_id, info in data.get("devices", {}).items():
+            print("\n* [{}] - {}".format(dev_id, info.get("name")))
+            print("  Category: {}".format(info.get("category")))
+            print("  Keys: {}".format(", ".join(info.get("keys", []))))
+    except Exception as e:
+        print("[!] Error querying hub daemon: {}".format(e))
+        print("    Make sure sweet-hub-daemon is running.")
+
+def send_key(device, key):
+    try:
+        params = urllib.parse.urlencode({"device": device, "key": key})
+        url = "{}/send?{}".format(API_URL, params)
+        req = urllib.request.Request(url, method="POST")
+        resp = urllib.request.urlopen(req, timeout=3)
+        res = json.loads(resp.read().decode("utf-8"))
+        if res.get("status") == "transmitted":
+            print("[+] IR Signal Sent -> Device: '{}', Key: '{}'".format(device, key))
+            if res.get("protocol"):
+                print("    Protocol: {}, Code: {}".format(res.get("protocol"), res.get("code")))
+        else:
+            print("[-] IR Send Result: {}".format(res))
+    except Exception as e:
+        print("[!] Failed to send IR code: {}".format(e))
+
+def launch_gui():
+    if not os.path.exists("/usr/share/sweetlinux/qml/IRRemoteHub.qml") and not os.path.exists("qml/IRRemoteHub.qml"):
+        print("[!] IRRemoteHub.qml not found.")
+        sys.exit(1)
+    
+    qml_path = "/usr/share/sweetlinux/qml/IRRemoteHub.qml" if os.path.exists("/usr/share/sweetlinux/qml/IRRemoteHub.qml") else "qml/IRRemoteHub.qml"
+    
+    # Check if daemon running
+    subprocess.run("pgrep -f sweet-hub-daemon >/dev/null 2>&1 || (/usr/local/bin/sweet-hub-daemon >/dev/null 2>&1 &)", shell=True)
+    
+    env = os.environ.copy()
+    env["QT_QPA_PLATFORM"] = "ubuntumirclient"
+    env["QML2_IMPORT_PATH"] = "/usr/lib/aarch64-linux-gnu/qt5/qml"
+    env["GRID_UNIT_PX"] = "24"
+    env["UBUNTU_APPLICATION_IS_TOUCH"] = "1"
+    
+    subprocess.run(["qmlscene", qml_path], env=env)
+
+def main():
+    if len(sys.argv) < 2:
+        launch_gui()
+        return
+
+    cmd = sys.argv[1].lower()
+    if cmd in ("-h", "--help", "help"):
+        show_help()
+    elif cmd == "list":
+        list_devices()
+    elif cmd == "gui":
+        launch_gui()
+    elif cmd == "send":
+        if len(sys.argv) < 4:
+            print("[!] Syntax: sweet-ir-remote send <device> <key>")
+            sys.exit(1)
+        send_key(sys.argv[2], sys.argv[3])
+    else:
+        # If passed two args: e.g. sweet-ir-remote samsung_tv power
+        if len(sys.argv) == 3:
+            send_key(sys.argv[1], sys.argv[2])
+        else:
+            show_help()
+
+if __name__ == "__main__":
+    main()

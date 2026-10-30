@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=IR Remote Controller
+Comment=Universal Infrared (IR) Blaster Remote for TVs, ACs, and Home Appliances
+Exec=/usr/local/bin/sweet-ir-remote
+Icon=/usr/share/pixmaps/sweet-ir-remote.svg
+Terminal=false
+Type=Application
+Categories=Utility;HardwareSettings;
+X-Ubuntu-Touch=true
+Keywords=ir;infrared;remote;blaster;tv;ac;lirc;consumer_ir;

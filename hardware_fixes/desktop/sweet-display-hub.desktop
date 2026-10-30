@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Display & 120Hz Hub
+Comment=Switch between 60Hz and 120Hz refresh rates and display calibration
+Exec=/usr/local/bin/sweet-display-hub
+Icon=/usr/share/pixmaps/sweet-display-hub.svg
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;
+X-Ubuntu-Touch=true
+Keywords=display;120hz;60hz;fps;refresh;screen;punchhole;

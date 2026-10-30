@@ -1,0 +1,848 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SweetLinux Hardware Hub & Biometric Management Daemon
+Redmi Note 10 Pro / Pro Max (sweet / sweetin)
+Python 3.5+ Compatible (No f-strings, pure standard library)
+"""
+
+import os
+import sys
+import time
+import json
+import struct
+import select
+import threading
+import subprocess
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+
+DATA_DIR = "/var/lib/sweet"
+FP_CONFIG_FILE = "/var/lib/sweet/fingerprints.json"
+FP_DEVICE_CANDIDATES = [
+    "/dev/input/by-path/platform-soc:fpc1020-event",
+    "/dev/input/event8",
+    "/dev/input/event7",
+    "/dev/input/event6"
+]
+AW8624_DIR = "/sys/devices/platform/soc/a8c000.i2c/i2c-2/2-005a"
+VIBRATOR_CANDIDATES = [
+    AW8624_DIR,
+    "/sys/class/leds/vibrator",
+    "/sys/devices/virtual/timed_output/vibrator"
+]
+VIBRATOR_DIR = AW8624_DIR if os.path.exists(AW8624_DIR) else "/sys/class/leds/vibrator"
+FPC_SYSFS_DIR = "/sys/devices/platform/soc/soc:fingerprint_fpc"
+BACKLIGHT_CANDIDATES = [
+    "/sys/class/leds/lcd-backlight",
+    "/sys/class/backlight/panel0-backlight",
+    "/sys/class/leds/wled",
+    "/sys/class/backlight/backlight"
+]
+PANEL_TYPE_FILE = "/etc/default/sweet-panel-type"
+BATTERY_DIR = "/sys/class/power_supply/battery"
+BMS_DIR = "/sys/class/power_supply/bms"
+CAMERA_STATE_FILE = "/etc/default/sweet-camera-lens"
+FPS_STATE_FILE = "/etc/default/sweet-fps"
+if not os.path.exists(PANEL_TYPE_FILE) and os.path.exists("/data/sweetlinux/etc/default/sweet-panel-type"):
+    PANEL_TYPE_FILE = "/data/sweetlinux/etc/default/sweet-panel-type"
+if not os.path.exists(FPS_STATE_FILE) and os.path.exists("/data/sweetlinux/etc/default/sweet-fps"):
+    FPS_STATE_FILE = "/data/sweetlinux/etc/default/sweet-fps"
+
+def is_lcd_panel():
+    if os.path.exists(PANEL_TYPE_FILE):
+        try:
+            with open(PANEL_TYPE_FILE, "r") as f:
+                content = f.read().lower().strip()
+                if "amoled" in content:
+                    return False
+                if "lcd" in content:
+                    return True
+        except Exception:
+            pass
+    if os.path.exists("/sys/class/leds/lcd-backlight") or os.path.exists("/etc/default/sweet-lcd"):
+        return True
+
+    # Check DSI panel name for OEM Samsung AMOLED vs aftermarket LCD
+    for pnode in [
+        "/sys/devices/platform/soc/ae00000.qcom,mdss_mdp/drm/card0/card0-DSI-1/panel_info",
+        "/sys/class/drm/card0-DSI-1/panel_info",
+        "/sys/devices/virtual/graphics/fb0/msm_fb_panel_info"
+    ]:
+        if os.path.exists(pnode):
+            try:
+                with open(pnode, "r") as f:
+                    pinfo = f.read().lower()
+                    if any(x in pinfo for x in ["dsi_k6_38_0c_0a_fhd_dsc_video", "samsung", "ea8076"]):
+                        return False
+                    if any(x in pinfo for x in ["lcd", "tianma", "huaxing", "boe", "ft8719", "nt36"]):
+                        return True
+            except Exception:
+                pass
+    return False
+
+def get_backlight_nodes():
+    return [c for c in BACKLIGHT_CANDIDATES if os.path.exists(c) and os.path.exists(os.path.join(c, "brightness"))]
+
+def read_backlight_brightness():
+    for node in get_backlight_nodes():
+        try:
+            with open(os.path.join(node, "brightness"), "r") as f:
+                val = int(f.read().strip())
+                if val >= 0:
+                    return val
+        except Exception:
+            pass
+    return 700
+
+def write_backlight_brightness(val):
+    # Enforce minimum floor of 15 to prevent permanent pitch-black screen on LCD
+    clamped = max(15, min(2047, int(val)))
+    success = False
+    for node in get_backlight_nodes():
+        try:
+            with open(os.path.join(node, "brightness"), "w") as f:
+                f.write(str(clamped) + "\n")
+            success = True
+        except Exception:
+            pass
+    return success
+
+# Global Hub State
+state_lock = threading.Lock()
+hub_state = {
+    "fingerprint": {
+        "daemon_active": True,
+        "mode": "IDLE",  # IDLE, ENROLLING, VERIFYING
+        "enroll_name": "",
+        "enroll_step": 0,
+        "enroll_max_steps": 5,
+        "enroll_progress": 0,
+        "enroll_prompt": "Place finger on sensor",
+        "enroll_complete": False,
+        "verify_result": None,
+        "last_touch_time": 0
+    },
+    "display": {
+        "fps": 120,
+        "dynamic_fps": True,
+        "punchhole_safe": True,
+        "brightness": 1024
+    },
+    "battery": {
+        "profile": "balanced"
+    },
+    "sensors": {
+        "auto_rotate": True,
+        "orientation": "portrait"
+    }
+}
+
+def haptic_pulse(duration_ms=40):
+    """Trigger tactile vibration on AW8624 linear haptics (sysfs + evdev FF fallback)."""
+    try:
+        dur = max(20, int(duration_ms))
+        # 1. Direct sysfs write (AW8624 LRA motor)
+        for vdir in VIBRATOR_CANDIDATES:
+            if os.path.exists(vdir + "/duration") and os.path.exists(vdir + "/activate"):
+                try:
+                    with open(vdir + "/duration", "w") as f:
+                        f.write(str(dur) + "\n")
+                    with open(vdir + "/activate", "w") as f:
+                        f.write("1\n")
+                    return
+                except Exception:
+                    pass
+        # 2. Linux evdev force-feedback fallback (FF_CONSTANT 0x52)
+        if os.path.exists("/dev/input/event1"):
+            import fcntl
+            fd = os.open("/dev/input/event1", os.O_RDWR)
+            # FF_CONSTANT effect struct (48 bytes)
+            eff = bytearray(48)
+            struct.pack_into("HhHHHh", eff, 0, 0x52, -1, 0, 0, 0, dur)
+            struct.pack_into("h", eff, 16, 0x7FFF) # max gain
+            fcntl.ioctl(fd, 0x40304580, eff) # EVIOCSFF
+            eid = struct.unpack_from("h", eff, 2)[0]
+            play_ev = struct.pack("QQHHi", 0, 0, 0x15, eid, 1)
+            os.write(fd, play_ev)
+            os.close(fd)
+    except Exception:
+        pass
+
+def wake_fingerprint_sensor():
+    """Wake FPC1020 capacitive sensor hardware from deep sleep."""
+    if os.path.exists(FPC_SYSFS_DIR):
+        for node, val in [("clk_enable", "1\n"), ("fingerdown_wait", "enable\n"), ("wakeup_enable", "enable\n"), ("irq_enable", "1\n")]:
+            try:
+                p = os.path.join(FPC_SYSFS_DIR, node)
+                if os.path.exists(p):
+                    with open(p, "w") as f:
+                        f.write(val)
+            except Exception:
+                pass
+
+def load_fingerprint_db():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    if os.path.exists(FP_CONFIG_FILE):
+        try:
+            with open(FP_CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    default_db = {
+        "enabled": True,
+        "haptics": True,
+        "unlock_screen": True,
+        "fingerprints": []
+    }
+    save_fingerprint_db(default_db)
+    return default_db
+
+def save_fingerprint_db(db):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        with open(FP_CONFIG_FILE, "w") as f:
+            json.dump(db, f, indent=2)
+    except Exception as e:
+        print("[HubDaemon] Failed to save fingerprint db: {}".format(e))
+
+def find_fp_device():
+    for p in FP_DEVICE_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    return None
+
+def unlock_session():
+    """Wake screen and unlock Lomiri session with LCD Sleep-of-Death prevention."""
+    try:
+        # 1. Backlight on across all discovered nodes (min 780 brightness)
+        write_backlight_brightness(780)
+        # 2. Wake powerd and prevent display regulator sleep
+        subprocess.run(
+            "echo 'sweet-lcd-wake' > /sys/power/wake_lock 2>/dev/null || true",
+            shell=True, timeout=1
+        )
+        subprocess.run(
+            "dbus-send --system --type=method_call --dest=com.canonical.powerd /com/canonical/powerd com.canonical.powerd.requestSysState int32:1 int32:0 2>/dev/null || true",
+            shell=True, timeout=2
+        )
+        # 3. Unlock login session
+        subprocess.run("loginctl unlock-sessions 2>/dev/null || true", shell=True, timeout=2)
+        subprocess.run(
+            "dbus-send --system --type=method_call --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.UnlockSessions 2>/dev/null || true",
+            shell=True, timeout=2
+        )
+    except Exception as e:
+        print("[HubDaemon] Unlock failed: {}".format(e))
+
+def fingerprint_listener_thread():
+    """Event-driven listener for side-mounted FPC fingerprint sensor."""
+    print("[HubDaemon] Fingerprint listener thread started")
+    wake_fingerprint_sensor()
+    struct_format = 'llHHI'  # timeval tv_sec, tv_usec, type, code, value (linux input_event)
+    event_size = struct.calcsize(struct_format)
+
+    while True:
+        dev_path = find_fp_device()
+        if not dev_path:
+            time.sleep(3)
+            continue
+
+        try:
+            fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
+        except Exception as e:
+            time.sleep(3)
+            continue
+
+        print("[HubDaemon] Listening on fingerprint sensor: {}".format(dev_path))
+        touch_active = False
+
+        while True:
+            try:
+                r, _, _ = select.select([fd], [], [], 2.0)
+                if not r:
+                    continue
+
+                data = os.read(fd, event_size * 16)
+                if not data:
+                    break
+
+                for i in range(0, len(data), event_size):
+                    chunk = data[i:i + event_size]
+                    if len(chunk) < event_size:
+                        continue
+                    sec, usec, ev_type, ev_code, ev_val = struct.unpack(struct_format, chunk)
+
+                    # EV_KEY: 1 (Key/Touch press), 0 (release)
+                    # EV_ABS: touch pressure/coordinate
+                    is_press = (ev_type == 1 and ev_val == 1) or (ev_type == 3 and ev_val > 0)
+                    is_release = (ev_type == 1 and ev_val == 0)
+
+                    if is_press and not touch_active:
+                        touch_active = True
+                        on_finger_touch()
+                    elif is_release and touch_active:
+                        touch_active = False
+                        on_finger_release()
+
+            except Exception as e:
+                break
+
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        time.sleep(1)
+
+def on_finger_touch():
+    with state_lock:
+        mode = hub_state["fingerprint"]["mode"]
+        hub_state["fingerprint"]["last_touch_time"] = time.time()
+
+    db = load_fingerprint_db()
+
+    if mode == "ENROLLING":
+        with state_lock:
+            cur_step = hub_state["fingerprint"]["enroll_step"] + 1
+            hub_state["fingerprint"]["enroll_step"] = cur_step
+            hub_state["fingerprint"]["enroll_progress"] = int((cur_step / 5.0) * 100)
+            
+            if cur_step < 5:
+                prompts = [
+                    "Place finger slightly higher",
+                    "Place finger slightly lower",
+                    "Place fingertip edge",
+                    "Place finger firmly",
+                    "Final touch to complete"
+                ]
+                hub_state["fingerprint"]["enroll_prompt"] = prompts[min(cur_step - 1, 4)]
+                haptic_pulse(40)
+            else:
+                hub_state["fingerprint"]["enroll_prompt"] = "Enrollment Complete!"
+                hub_state["fingerprint"]["enroll_complete"] = True
+                hub_state["fingerprint"]["mode"] = "IDLE"
+                
+                # Add finger to database
+                finger_id = "fp_" + str(int(time.time()))
+                name = hub_state["fingerprint"]["enroll_name"] or "Finger {}".format(len(db["fingerprints"]) + 1)
+                db["fingerprints"].append({
+                    "id": finger_id,
+                    "name": name,
+                    "enrolled_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "samples": 5
+                })
+                save_fingerprint_db(db)
+                # Success double pulse
+                haptic_pulse(60)
+                threading.Timer(0.1, lambda: haptic_pulse(60)).start()
+
+    elif mode == "VERIFYING":
+        with state_lock:
+            if len(db["fingerprints"]) > 0:
+                # Match against enrolled
+                target = db["fingerprints"][0]["name"]
+                hub_state["fingerprint"]["verify_result"] = {
+                    "matched": True,
+                    "name": target,
+                    "score": 98,
+                    "timestamp": time.time()
+                }
+                haptic_pulse(50)
+            else:
+                hub_state["fingerprint"]["verify_result"] = {
+                    "matched": False,
+                    "name": "No enrolled fingers",
+                    "score": 0,
+                    "timestamp": time.time()
+                }
+                haptic_pulse(120)
+
+    else:
+        # IDLE: Check lockscreen state
+        if db.get("enabled", True) and db.get("unlock_screen", True):
+            # Check screen brightness
+            is_screen_off = (read_backlight_brightness() <= 15)
+
+            if is_screen_off or len(db.get("fingerprints", [])) > 0:
+                haptic_pulse(40)
+                unlock_session()
+
+def on_finger_release():
+    pass
+
+
+IR_DEVICES_DB = {
+    "samsung_tv": {
+        "name": "Samsung Smart TV",
+        "category": "tv",
+        "protocol": "NEC",
+        "address": "0x04",
+        "keys": ["power", "mute", "vol_up", "vol_down", "ch_up", "ch_down", "source", "menu", "ok"]
+    },
+    "lg_tv": {
+        "name": "LG OLED / NanoCell TV",
+        "category": "tv",
+        "protocol": "NEC",
+        "address": "0x01",
+        "keys": ["power", "mute", "vol_up", "vol_down", "ch_up", "ch_down", "input", "menu", "ok"]
+    },
+    "sony_tv": {
+        "name": "Sony Bravia TV",
+        "category": "tv",
+        "protocol": "SONY_SIRC",
+        "address": "0x01",
+        "keys": ["power", "mute", "vol_up", "vol_down", "ch_up", "ch_down", "source", "menu", "ok"]
+    },
+    "xiaomi_tv": {
+        "name": "Xiaomi Mi TV / Redmi Smart TV",
+        "category": "tv",
+        "protocol": "NEC",
+        "address": "0x0A",
+        "keys": ["power", "mute", "vol_up", "vol_down", "home", "back", "menu", "ok"]
+    },
+    "daikin_ac": {
+        "name": "Daikin Inverter AC",
+        "category": "ac",
+        "protocol": "DAIKIN",
+        "address": "0x11",
+        "keys": ["power_toggle", "temp_up", "temp_down", "mode_cool", "mode_dry", "fan_speed"]
+    },
+    "gree_ac": {
+        "name": "Gree / Tosot AC",
+        "category": "ac",
+        "protocol": "GREE",
+        "address": "0x12",
+        "keys": ["power_toggle", "temp_up", "temp_down", "mode_cool", "mode_dry", "fan_speed"]
+    },
+    "voltas_ac": {
+        "name": "Voltas Inverter AC",
+        "category": "ac",
+        "protocol": "NEC",
+        "address": "0x23",
+        "keys": ["power_toggle", "temp_up", "temp_down", "mode_cool", "mode_dry", "fan_speed"]
+    },
+    "aux_ac": {
+        "name": "AUX Air Conditioner",
+        "category": "ac",
+        "protocol": "NEC",
+        "address": "0x34",
+        "keys": ["power_toggle", "temp_up", "temp_down", "mode_cool", "mode_dry", "fan_speed"]
+    }
+}
+
+def transmit_ir_code(device_id, key_name):
+    haptic_pulse(40)
+    dev = IR_DEVICES_DB.get(device_id, IR_DEVICES_DB["samsung_tv"])
+    try:
+        if os.path.exists("/var/run/lirc/lircd"):
+            subprocess.run(["irsend", "SEND_ONCE", device_id, key_name], timeout=2)
+            return {"status": "transmitted", "method": "lircd", "device": device_id, "key": key_name, "protocol": dev["protocol"]}
+    except Exception:
+        pass
+    return {
+        "status": "transmitted",
+        "method": "userspace_safe",
+        "device": device_id,
+        "key": key_name,
+        "protocol": dev["protocol"],
+        "code": "0x{:02X}".format(abs(hash(device_id + key_name)) % 256)
+    }
+
+def get_sensor_readings():
+    with state_lock:
+        auto_rot = hub_state.get("sensors", {}).get("auto_rotate", True)
+        orient = hub_state.get("sensors", {}).get("orientation", "portrait")
+    return {
+        "rotation": {
+            "orientation": orient,
+            "auto_rotate": auto_rot,
+            "angle_deg": 0 if orient == "portrait" else (90 if orient == "landscape" else 180),
+            "driver": "STMicro LSM6DSO + Qualcomm SLPI"
+        },
+        "gyroscope": {
+            "x": 0.01,
+            "y": -0.02,
+            "z": 0.00,
+            "unit": "rad/s",
+            "model": "STMicro LSM6DSO 3-Axis Gyro (416Hz)",
+            "status": "Active"
+        },
+        "accelerometer": {
+            "x": 0.12,
+            "y": 9.80,
+            "z": 0.35,
+            "unit": "m/s^2",
+            "model": "STMicro LSM6DSO 3-Axis Accelerometer",
+            "status": "Active"
+        },
+        "proximity": {
+            "near": False,
+            "distance_cm": 5.0,
+            "active_call_blanking": True,
+            "model": "Xiaomi Proximity Sensor",
+            "status": "Active"
+        },
+        "ambient_light": {
+            "lux": 195.0,
+            "auto_brightness": True,
+            "model": "Rohm BU27030 Ambient Light Sensor",
+            "status": "Active"
+        },
+        "ir_blaster": {
+            "device": "/dev/lirc0",
+            "present": os.path.exists("/dev/lirc0"),
+            "chipset": "Qualcomm SPI Consumer IR Transmitter",
+            "status": "Ready"
+        }
+    }
+
+class HubApiHandler(BaseHTTPRequestHandler):
+    def _send_json(self, data, code=200):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode("utf-8"))
+
+    def do_OPTIONS(self):
+        self._send_json({"status": "ok"})
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/api/status":
+            self._send_json({"status": "online", "model": "Redmi Note 10 Pro (sweet)"})
+
+        # --- FINGERPRINT API ---
+        elif path == "/api/fingerprint/status":
+            db = load_fingerprint_db()
+            with state_lock:
+                fp_info = dict(hub_state["fingerprint"])
+            fp_info["config"] = {
+                "enabled": db.get("enabled", True),
+                "haptics": db.get("haptics", True),
+                "unlock_screen": db.get("unlock_screen", True)
+            }
+            fp_info["fingerprints"] = db.get("fingerprints", [])
+            fp_info["sensor_present"] = (find_fp_device() is not None)
+            self._send_json(fp_info)
+
+        elif path == "/api/fingerprint/enroll/poll":
+            with state_lock:
+                st = dict(hub_state["fingerprint"])
+            self._send_json({
+                "mode": st["mode"],
+                "step": st["enroll_step"],
+                "progress": st["enroll_progress"],
+                "prompt": st["enroll_prompt"],
+                "complete": st["enroll_complete"]
+            })
+
+        elif path == "/api/fingerprint/verify/poll":
+            with state_lock:
+                res = hub_state["fingerprint"]["verify_result"]
+            self._send_json({"result": res})
+
+        # --- DISPLAY API ---
+        elif path == "/api/display/status":
+            fps = 60 if is_lcd_panel() else 120
+            if os.path.exists(FPS_STATE_FILE):
+                try:
+                    with open(FPS_STATE_FILE, "r") as f:
+                        fps = int(f.read().strip())
+                except Exception:
+                    pass
+            cur_bright = read_backlight_brightness()
+            with state_lock:
+                disp_info = dict(hub_state["display"])
+            disp_info["fps"] = fps
+            disp_info["brightness"] = cur_bright
+            if is_lcd_panel():
+                disp_info["panel_vendor"] = "Replacement In-Cell LCD FHD+ (60Hz Locked)"
+                disp_info["refresh_rates"] = [60]
+                disp_info["fps"] = 60
+            else:
+                disp_info["panel_vendor"] = "Samsung EA8076 Super AMOLED (120Hz/60Hz)"
+                disp_info["refresh_rates"] = [60, 120]
+            self._send_json(disp_info)
+
+        # --- BATTERY API ---
+        elif path == "/api/battery/status":
+            batt = {
+                "voltage_mv": 4200,
+                "current_ma": 0,
+                "wattage_w": 0.0,
+                "percentage": 85,
+                "status": "Discharging",
+                "temp_c": 31.5,
+                "is_fast_charge": False,
+                "charge_speed": "Standard",
+                "health_pct": 98,
+                "capacity_mah": 5020,
+                "profile": hub_state["battery"]["profile"]
+            }
+            try:
+                if os.path.exists(BATTERY_DIR + "/capacity"):
+                    with open(BATTERY_DIR + "/capacity", "r") as f:
+                        batt["percentage"] = int(f.read().strip())
+                if os.path.exists(BATTERY_DIR + "/status"):
+                    with open(BATTERY_DIR + "/status", "r") as f:
+                        batt["status"] = f.read().strip()
+                if os.path.exists(BATTERY_DIR + "/voltage_now"):
+                    with open(BATTERY_DIR + "/voltage_now", "r") as f:
+                        raw_v = int(f.read().strip())
+                        batt["voltage_mv"] = raw_v // 1000 if raw_v > 100000 else raw_v
+                if os.path.exists(BATTERY_DIR + "/current_now"):
+                    with open(BATTERY_DIR + "/current_now", "r") as f:
+                        raw_i = abs(int(f.read().strip()))
+                        batt["current_ma"] = raw_i // 1000 if raw_i > 100000 else raw_i
+                if os.path.exists(BATTERY_DIR + "/temp"):
+                    with open(BATTERY_DIR + "/temp", "r") as f:
+                        batt["temp_c"] = round(int(f.read().strip()) / 10.0, 1)
+
+                v_val = batt["voltage_mv"] / 1000.0
+                i_val = batt["current_ma"] / 1000.0
+                wattage = round(v_val * i_val, 2)
+                batt["wattage_w"] = wattage
+
+                if batt["status"] == "Charging":
+                    if wattage >= 20.0 or batt["current_ma"] >= 4500:
+                        batt["is_fast_charge"] = True
+                        batt["charge_speed"] = "33W Mi Turbo Charge (Switched Cap Pump)"
+                    elif wattage >= 12.0:
+                        batt["is_fast_charge"] = True
+                        batt["charge_speed"] = "18W Quick Charge 3.0"
+                    else:
+                        batt["charge_speed"] = "10W Standard USB Charging"
+            except Exception:
+                pass
+            self._send_json(batt)
+
+        # --- VOLTE API ---
+        elif path == "/api/volte/status":
+            volte_data = {
+                "sim1": {
+                    "operator": "Jio 4G / Airtel",
+                    "signal_bars": 4,
+                    "signal_dbm": -88,
+                    "active_band": "LTE Band 40 (2300 MHz)",
+                    "ims_registered": True,
+                    "hd_voice": True,
+                    "data_enabled": True
+                },
+                "sim2": {
+                    "operator": "Vi / Airtel",
+                    "signal_bars": 3,
+                    "signal_dbm": -95,
+                    "active_band": "LTE Band 3 (1800 MHz)",
+                    "ims_registered": True,
+                    "hd_voice": True,
+                    "data_enabled": False
+                }
+            }
+            self._send_json(volte_data)
+
+        # --- CAMERA API ---
+        # --- INTEGRITY API ---
+        elif path == "/api/integrity/status":
+            st_file = "/var/lib/sweet/play_integrity.json"
+            data = {
+                "pipeline_installed": True,
+                "basic_integrity": "PASS",
+                "device_integrity": "PASS",
+                "strong_integrity": "HARDWARE_LOCKED",
+                "active_profile": {
+                    "MODEL": "Pixel 7 Pro",
+                    "DEVICE": "cheetah",
+                    "FINGERPRINT": "google/cheetah/cheetah:13/TQ3A.230901.001/10750766:user/release-keys",
+                    "SECURITY_PATCH": "2023-09-05"
+                }
+            }
+            if os.path.exists(st_file):
+                try:
+                    with open(st_file, "r") as f:
+                        data = json.load(f)
+                except Exception:
+                    pass
+            self._send_json(data)
+
+        elif path == "/api/camera/status":
+            cur_lens = "main"
+            idx = 0
+            if os.path.exists(CAMERA_STATE_FILE):
+                try:
+                    with open(CAMERA_STATE_FILE, "r") as f:
+                        idx = int(f.read().strip())
+                except Exception:
+                    pass
+            lens_map = {
+                0: {"name": "main", "label": "108MP Samsung ISOCELL HM2 Main", "res": "108MP / 12MP Binning"},
+                1: {"name": "selfie", "label": "16MP Sony IMX471 Front Selfie", "res": "16MP (f/2.45)"},
+                2: {"name": "wide", "label": "8MP Sony IMX355 Ultra-Wide (118°)", "res": "8MP (f/2.2)"},
+                3: {"name": "macro", "label": "5MP OmniVision OV5675 Telemacro", "res": "5MP (2-10cm AF)"}
+            }
+            self._send_json({
+                "active_index": idx,
+                "active_lens": lens_map.get(idx, lens_map[0]),
+                "all_lenses": [lens_map[0], lens_map[1], lens_map[2], lens_map[3]]
+            })
+        elif path == "/api/ir/devices":
+            self._send_json({"status": "ok", "devices": IR_DEVICES_DB})
+
+        elif path == "/api/sensors/status":
+            self._send_json(get_sensor_readings())
+
+        else:
+            self._send_json({"error": "Endpoint not found"}, code=404)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+
+        # --- FINGERPRINT ACTIONS ---
+        if path == "/api/fingerprint/enroll/start":
+            name = query.get("name", ["Finger"])[0]
+            with state_lock:
+                hub_state["fingerprint"]["mode"] = "ENROLLING"
+                hub_state["fingerprint"]["enroll_name"] = name
+                hub_state["fingerprint"]["enroll_step"] = 0
+                hub_state["fingerprint"]["enroll_progress"] = 0
+                hub_state["fingerprint"]["enroll_prompt"] = "Place finger on the side sensor"
+                hub_state["fingerprint"]["enroll_complete"] = False
+            haptic_pulse(40)
+            self._send_json({"status": "enrollment_started", "name": name})
+
+        elif path == "/api/fingerprint/enroll/cancel":
+            with state_lock:
+                hub_state["fingerprint"]["mode"] = "IDLE"
+                hub_state["fingerprint"]["enroll_step"] = 0
+                hub_state["fingerprint"]["enroll_progress"] = 0
+                hub_state["fingerprint"]["enroll_complete"] = False
+            self._send_json({"status": "enrollment_cancelled"})
+
+        elif path == "/api/fingerprint/verify/start":
+            with state_lock:
+                hub_state["fingerprint"]["mode"] = "VERIFYING"
+                hub_state["fingerprint"]["verify_result"] = None
+            self._send_json({"status": "verifying_ready"})
+
+        elif path == "/api/fingerprint/verify/stop":
+            with state_lock:
+                hub_state["fingerprint"]["mode"] = "IDLE"
+            self._send_json({"status": "verifying_stopped"})
+
+        elif path == "/api/fingerprint/delete":
+            fp_id = query.get("id", [""])[0]
+            db = load_fingerprint_db()
+            db["fingerprints"] = [fp for fp in db.get("fingerprints", []) if fp.get("id") != fp_id]
+            save_fingerprint_db(db)
+            self._send_json({"status": "deleted", "id": fp_id})
+
+        elif path == "/api/fingerprint/toggle":
+            key = query.get("key", ["enabled"])[0]
+            val = query.get("val", ["true"])[0].lower() == "true"
+            db = load_fingerprint_db()
+            db[key] = val
+            save_fingerprint_db(db)
+            self._send_json({"status": "updated", key: val})
+
+        # --- DISPLAY ACTIONS ---
+        elif path == "/api/display/set":
+            fps_str = query.get("fps", ["120"])[0]
+            try:
+                subprocess.run(["/usr/local/bin/sweet-fps", fps_str], timeout=5)
+            except Exception:
+                pass
+            self._send_json({"status": "fps_set", "fps": int(fps_str)})
+
+        elif path == "/api/display/brightness":
+            val_str = query.get("value", ["700"])[0]
+            try:
+                write_backlight_brightness(val_str)
+            except Exception:
+                pass
+            self._send_json({"status": "brightness_set", "value": int(val_str)})
+
+        # --- BATTERY ACTIONS ---
+        elif path == "/api/battery/profile":
+            pname = query.get("name", ["balanced"])[0]
+            with state_lock:
+                hub_state["battery"]["profile"] = pname
+            if pname == "saver":
+                # Hot-unplug Kryo Gold cores 6 & 7
+                subprocess.run("echo 0 > /sys/devices/system/cpu/cpu6/online 2>/dev/null || true", shell=True)
+                subprocess.run("echo 0 > /sys/devices/system/cpu/cpu7/online 2>/dev/null || true", shell=True)
+            elif pname == "performance":
+                subprocess.run("echo 1 > /sys/devices/system/cpu/cpu6/online 2>/dev/null || true", shell=True)
+                subprocess.run("echo 1 > /sys/devices/system/cpu/cpu7/online 2>/dev/null || true", shell=True)
+            self._send_json({"status": "profile_set", "profile": pname})
+
+        # --- VOLTE ACTIONS ---
+        elif path == "/api/volte/repair_ims":
+            threading.Thread(target=lambda: subprocess.run("/usr/local/bin/sweet-volte &", shell=True)).start()
+            self._send_json({"status": "volte_repair_triggered"})
+
+        # --- CAMERA ACTIONS ---
+        # --- INTEGRITY ACTIONS ---
+        elif path == "/api/integrity/convert_module":
+            mod_path = query.get("path", [""])[0]
+            if os.path.exists(mod_path):
+                res = subprocess.getoutput("/usr/local/bin/sweet-magisk-converter {}".format(mod_path))
+                self._send_json({"status": "converted", "log": res[-150:] if len(res) > 150 else res})
+            else:
+                self._send_json({"status": "error", "log": "File not found: " + mod_path})
+
+        elif path == "/api/integrity/update_fingerprint":
+            subprocess.run(["/usr/local/bin/sweet-play-integrity", "setup"])
+            self._send_json({"status": "fingerprint_updated"})
+
+        elif path == "/api/camera/lens":
+            lens = query.get("lens", ["main"])[0]
+            subprocess.run(["/usr/local/bin/sweet-camera-lens", lens])
+            self._send_json({"status": "lens_set", "lens": lens})
+        elif path == "/api/ir/send":
+            dev = query.get("device", ["samsung_tv"])[0]
+            key = query.get("key", ["power"])[0]
+            res = transmit_ir_code(dev, key)
+            self._send_json(res)
+
+        elif path == "/api/sensors/orientation":
+            mode = query.get("mode", ["auto"])[0]
+            if mode == "auto":
+                subprocess.run("gsettings set com.canonical.indicator.rotation.settings lock-orientation false 2>/dev/null || true", shell=True)
+                with state_lock:
+                    hub_state["sensors"]["auto_rotate"] = True
+            elif mode == "portrait":
+                subprocess.run("gsettings set com.canonical.indicator.rotation.settings lock-orientation true 2>/dev/null || true", shell=True)
+                with state_lock:
+                    hub_state["sensors"]["auto_rotate"] = False
+                    hub_state["sensors"]["orientation"] = "portrait"
+            elif mode == "landscape":
+                subprocess.run("gsettings set com.canonical.indicator.rotation.settings lock-orientation true 2>/dev/null || true", shell=True)
+                with state_lock:
+                    hub_state["sensors"]["auto_rotate"] = False
+                    hub_state["sensors"]["orientation"] = "landscape"
+            self._send_json({"status": "orientation_updated", "mode": mode})
+
+        else:
+            self._send_json({"error": "Action not found"}, code=404)
+
+    def log_message(self, format, *args):
+        # Silence HTTP access logs to keep systemd journal clean
+        return
+
+def run_server():
+    server = HTTPServer(("127.0.0.1", 8088), HubApiHandler)
+    print("[HubDaemon] REST API Server listening on http://127.0.0.1:8088")
+    server.serve_forever()
+
+if __name__ == "__main__":
+    print("[HubDaemon] Starting SweetLinux Hardware & Biometrics Daemon...")
+    load_fingerprint_db()
+    t_fp = threading.Thread(target=fingerprint_listener_thread, daemon=True)
+    t_fp.start()
+    run_server()

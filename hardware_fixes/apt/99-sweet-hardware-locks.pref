@@ -1,0 +1,19 @@
+Package: libhybris*
+Pin: origin repo.ubports.com
+Pin-Priority: 1001
+
+Package: droid-hal*
+Pin: origin repo.ubports.com
+Pin-Priority: 1001
+
+Package: pulseaudio*
+Pin: origin repo.ubports.com
+Pin-Priority: 1001
+
+Package: mir*
+Pin: origin repo.ubports.com
+Pin-Priority: 1001
+
+Package: lomiri*
+Pin: origin repo.ubports.com
+Pin-Priority: 1001

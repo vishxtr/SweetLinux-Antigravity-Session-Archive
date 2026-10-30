@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+SweetLinux Native Android Edge Gestures Engine
+Redmi Note 10 Pro / Pro Max (sweet / sweetin)
+Features:
+- Dynamic touchscreen device discovery (/proc/bus/input/devices matching goodix_ts or ABS_MT)
+- Low latency edge swipe detection (Left/Right -> Back, Bottom -> Home, Bottom Hold -> Recents)
+- Native AW8624 Linear Haptics tactile click on gesture actuation
+- Direct Linux uinput event injection (KEY_BACK, KEY_HOMEPAGE, KEY_APPSELECT)
+"""
+import os, sys, time, struct, select, glob
+
+EVENT_FORMAT = 'llHHI'
+EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
+
+KEY_ESC = 1
+KEY_BACK = 158
+KEY_HOMEPAGE = 172
+KEY_LEFTMETA = 125
+KEY_APPSELECT = 580
+
+SCREEN_WIDTH = 1080
+SCREEN_HEIGHT = 2400
+
+UINPUT_DEVICE = '/dev/uinput'
+uinput_fd = -1
+try:
+    import fcntl
+    uinput_fd = os.open(UINPUT_DEVICE, os.O_WRONLY | os.O_NONBLOCK)
+    fcntl.ioctl(uinput_fd, 0x40045564, 1) # UI_SET_EVBIT -> EV_KEY
+    for k in [KEY_ESC, KEY_BACK, KEY_HOMEPAGE, KEY_LEFTMETA, KEY_APPSELECT, 28]:
+        fcntl.ioctl(uinput_fd, 0x40045565, k) # UI_SET_KEYBIT
+    
+    uidev = bytearray(80 + 4 * 4)
+    name = b'sweet-android-gestures'
+    uidev[0:len(name)] = name
+    struct.pack_into('HHII', uidev, 80, 0x03, 0x01, 0x01, 0x01)
+    os.write(uinput_fd, uidev)
+    fcntl.ioctl(uinput_fd, 0x5501, 0)
+except Exception as e:
+    sys.stderr.write('[Gestures] uinput warning: %s
+' % e)
+
+def trigger_haptic(duration_ms=25):
+    try:
+        vdir = '/sys/devices/platform/soc/a8c000.i2c/i2c-2/2-005a'
+        if os.path.exists(vdir + '/duration') and os.path.exists(vdir + '/activate'):
+            with open(vdir + '/duration', 'w') as f:
+                f.write('%d
+' % duration_ms)
+            with open(vdir + '/activate', 'w') as f:
+                f.write('1
+')
+            return
+        for cand in ['/sys/class/leds/vibrator', '/sys/devices/virtual/timed_output/vibrator']:
+            if os.path.exists(cand + '/duration'):
+                with open(cand + '/duration', 'w') as f:
+                    f.write('%d
+' % duration_ms)
+                with open(cand + '/activate', 'w') as f:
+                    f.write('1
+')
+                return
+    except Exception:
+        pass
+
+def send_key(key):
+    trigger_haptic(25)
+    if uinput_fd >= 0:
+        ev_press = struct.pack('llHHi', 0, 0, 1, key, 1)
+        ev_syn = struct.pack('llHHi', 0, 0, 0, 0, 0)
+        os.write(uinput_fd, ev_press + ev_syn)
+        time.sleep(0.015)
+        ev_rel = struct.pack('llHHi', 0, 0, 1, key, 0)
+        os.write(uinput_fd, ev_rel + ev_syn)
+    else:
+        if key == KEY_BACK:
+            os.system('xdotool key Escape 2>/dev/null || true')
+        elif key == KEY_HOMEPAGE:
+            os.system('xdotool key Super 2>/dev/null || true')
+
+def find_touchscreen_device():
+    ts_keywords = ['touchscreen', 'ts', 'goodix', 'focaltech', 'novatek', 'synaptics', 'ft5', 'nt3', 'chipone']
+    if os.path.exists('/proc/bus/input/devices'):
+        try:
+            with open('/proc/bus/input/devices') as f:
+                content = f.read()
+            for b in content.split('
+
+'):
+                b_lower = b.lower()
+                if any(k in b_lower for k in ts_keywords) or 'abs=' in b_lower:
+                    for line in b.splitlines():
+                        if 'Handlers=' in line:
+                            for part in line.split():
+                                if part.startswith('event'):
+                                    cand = '/dev/input/' + part
+                                    if os.path.exists(cand):
+                                        return cand
+        except Exception:
+            pass
+
+    for p in glob.glob('/sys/class/input/event*/device/name'):
+        try:
+            with open(p) as f:
+                name = f.read().strip().lower()
+            if any(k in name for k in ts_keywords):
+                ev = os.path.basename(os.path.dirname(os.path.dirname(p)))
+                cand = '/dev/input/' + ev
+                if os.path.exists(cand):
+                    return cand
+        except Exception:
+            pass
+
+    for ev in ['/dev/input/event4', '/dev/input/event3', '/dev/input/event2', '/dev/input/event5']:
+        if os.path.exists(ev):
+            return ev
+    return None
+
+def main():
+    while True:
+        dev_path = find_touchscreen_device()
+        if not dev_path:
+            time.sleep(3)
+            continue
+        try:
+            fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
+        except Exception:
+            time.sleep(3)
+            continue
+
+        start_x, start_y, start_t = None, None, None
+        cur_x, cur_y = None, None
+
+        while True:
+            try:
+                r, _, _ = select.select([fd], [], [], 2.0)
+                if not r: continue
+                data = os.read(fd, EVENT_SIZE * 32)
+                if not data: break
+            except Exception:
+                break
+
+            for i in range(0, len(data), EVENT_SIZE):
+                chunk = data[i:i+EVENT_SIZE]
+                if len(chunk) < EVENT_SIZE: break
+                _, _, ev_type, ev_code, ev_val = struct.unpack(EVENT_FORMAT, chunk)
+
+                if ev_type == 3:
+                    if ev_code in (53, 0):
+                        cur_x = ev_val
+                        if start_x is None: start_x = ev_val
+                    elif ev_code in (54, 1):
+                        cur_y = ev_val
+                        if start_y is None: start_y = ev_val
+                    elif ev_code == 57:
+                        if ev_val != -1:
+                            start_x, start_y, start_t = cur_x, cur_y, time.time()
+                        else:
+                            if start_x is not None and cur_x is not None and start_y is not None and cur_y is not None:
+                                dx = cur_x - start_x
+                                dy = cur_y - start_y
+                                dt = time.time() - (start_t or time.time())
+                                
+                                if (start_x <= 130 and dx >= 110 and abs(dy) < 280) or                                    (start_x >= 950 and dx <= -110 and abs(dy) < 280):
+                                    send_key(KEY_BACK)
+                                elif start_y >= 2180 and dy <= -160:
+                                    if dt < 0.38:
+                                        send_key(KEY_HOMEPAGE)
+                                    else:
+                                        send_key(KEY_APPSELECT)
+                                elif start_y <= 120 and dy >= 180 and abs(dx) < 250:
+                                    os.system('sweet-control-center &')
+
+                            start_x, start_y, start_t = None, None, None
+
+        try: os.close(fd)
+        except Exception: pass
+        time.sleep(1)
+
+if __name__ == '__main__':
+    main()

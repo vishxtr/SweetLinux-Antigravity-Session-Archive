@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+echo "=== SweetLinux Safe System Updater ==="
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef"
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable sweet-gestures.service sweet-audio.service prevent-sod.service sweet-hub-daemon.service remount-rw.service 2>/dev/null || true
+chmod +x /usr/local/bin/sweet-* /usr/local/bin/rw /usr/local/bin/ro 2>/dev/null || true
+echo "=== Upgrade complete! All hardware fixes intact. ==="

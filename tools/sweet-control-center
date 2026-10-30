@@ -1,0 +1,10 @@
+#!/bin/bash
+if ! pgrep -f "sweet-hub-daemon" >/dev/null 2>&1; then
+    /usr/local/bin/sweet-hub-daemon >/dev/null 2>&1 &
+    sleep 0.5
+fi
+export QT_QPA_PLATFORM=ubuntumirclient
+export QML2_IMPORT_PATH=/usr/lib/aarch64-linux-gnu/qt5/qml
+export GRID_UNIT_PX=24
+export UBUNTU_APPLICATION_IS_TOUCH=1
+exec qmlscene /usr/share/sweetlinux/qml/ControlCenter.qml "$@"

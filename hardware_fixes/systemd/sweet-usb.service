@@ -1,0 +1,13 @@
+[Unit]
+Description=SweetLinux USB Gadget & OTG Automount Service
+After=sys-kernel-config.mount local-fs.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/sweet-usb-manager init
+ExecReload=/usr/local/bin/sweet-usb-manager set mtp_adb
+
+[Install]
+WantedBy=sysinit.target

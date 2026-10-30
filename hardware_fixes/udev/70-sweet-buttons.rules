@@ -1,0 +1,9 @@
+# SweetLinux Physical Buttons Configuration (Power, Volume Up, Volume Down)
+# PM8150 PON Power Key
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{name}=="*pon*|*pwrkey*|*power*", ENV{ID_INPUT_KEY}="1", TAG+="power-switch", MODE="0660", GROUP="input"
+
+# Volume Up & Down Keys (gpio-keys)
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{name}=="*gpio-keys*|*volume*", ENV{ID_INPUT_KEY}="1", MODE="0660", GROUP="input"
+
+# Ensure all input event nodes have input group access for Lomiri & daemons
+SUBSYSTEM=="input", KERNEL=="event*", MODE="0660", GROUP="input"

@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SweetLinux Magisk Module Converter & Installer
+Converts standard Magisk ZIP modules into Waydroid-compatible modules
+or native GNU/Linux systemd/sysfs services.
+Python 3.5+ Compatible.
+"""
+
+import os
+import sys
+import zipfile
+import shutil
+import subprocess
+
+MODULES_DIR = "/var/lib/sweet/magisk_modules"
+SYSTEMD_DIR = "/etc/systemd/system"
+
+def convert_module(zip_path):
+    if not os.path.exists(zip_path):
+        print("[Error] Module file not found: {}".format(zip_path))
+        return False
+
+    print("=================================================================")
+    print("        SweetLinux Magisk Module Converter & Installer")
+    print("=================================================================")
+    print("Processing: {}".format(zip_path))
+
+    temp_extract = "/tmp/magisk_extract_" + str(int(os.path.getmtime(zip_path)))
+    shutil.rmtree(temp_extract, ignore_errors=True)
+    os.makedirs(temp_extract, exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            z.extractall(temp_extract)
+    except Exception as e:
+        print("[Error] Invalid zip archive: {}".format(e))
+        return False
+
+    # Read module.prop
+    prop_path = os.path.join(temp_extract, "module.prop")
+    mod_id = "custom_module"
+    mod_name = "Custom Magisk Module"
+    mod_version = "1.0"
+    mod_author = "Unknown"
+    mod_desc = ""
+
+    if os.path.exists(prop_path):
+        with open(prop_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("id="):
+                    mod_id = line.split("=", 1)[1]
+                elif line.startswith("name="):
+                    mod_name = line.split("=", 1)[1]
+                elif line.startswith("version="):
+                    mod_version = line.split("=", 1)[1]
+                elif line.startswith("author="):
+                    mod_author = line.split("=", 1)[1]
+                elif line.startswith("description="):
+                    mod_desc = line.split("=", 1)[1]
+
+    print("\n--- Module Properties ---")
+    print("ID         : {}".format(mod_id))
+    print("Name       : {}".format(mod_name))
+    print("Version    : {}".format(mod_version))
+    print("Author     : {}".format(mod_author))
+    print("Description: {}".format(mod_desc))
+
+    has_zygisk = os.path.exists(os.path.join(temp_extract, "zygisk"))
+    has_system = os.path.exists(os.path.join(temp_extract, "system"))
+    service_sh = os.path.join(temp_extract, "service.sh")
+    has_service = os.path.exists(service_sh)
+
+    # 1. Waydroid Android Framework Module
+    if has_zygisk or has_system or not has_service:
+        dest_mod = os.path.join(MODULES_DIR, mod_id)
+        os.makedirs(dest_mod, exist_ok=True)
+        shutil.copytree(temp_extract, dest_mod, dirs_exist_ok=True)
+        print("\n[+] Deployed as Waydroid Android Framework Module:")
+        print("    Target: {}".format(dest_mod))
+        print("    Status: Fully compatible in Waydroid Magisk/Zygisk runtime")
+
+    # 2. Kernel / Sysfs tweaks -> Convert to Native Linux Systemd Unit
+    if has_service:
+        sysfs_lines = []
+        with open(service_sh, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                l = line.strip()
+                if l and not l.startswith("#"):
+                    if any(k in l for k in ["/sys/", "/proc/", "echo", "chmod"]):
+                        sysfs_lines.append(l)
+
+        if sysfs_lines:
+            print("\n[+] Detected Kernel / Sysfs Hardware Tweaks in service.sh:")
+            runner_script = "/usr/local/bin/magisk-{}.sh".format(mod_id)
+            with open(runner_script, "w") as f:
+                f.write("#!/bin/bash\n# Converted Magisk Module: {}\n".format(mod_name))
+                for sl in sysfs_lines:
+                    f.write(sl + "\n")
+            os.chmod(runner_script, 0o755)
+
+            # Generate Systemd Service
+            svc_name = "magisk-{}.service".format(mod_id)
+            svc_path = os.path.join(SYSTEMD_DIR, svc_name)
+            svc_content = """[Unit]
+Description=Converted Magisk Hardware Module: {}
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart={}
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+""".format(mod_name, runner_script)
+            with open(svc_path, "w") as f:
+                f.write(svc_content)
+
+            wants_link = os.path.join(SYSTEMD_DIR, "multi-user.target.wants", svc_name)
+            try:
+                os.makedirs(os.path.dirname(wants_link), exist_ok=True)
+                if os.path.exists(wants_link):
+                    os.remove(wants_link)
+                os.symlink(svc_path, wants_link)
+            except Exception:
+                pass
+
+            print("    Created Native Linux Script : {}".format(runner_script))
+            print("    Created Native Systemd Unit : {}".format(svc_path))
+            print("    Status: Converted and enabled for native boot execution!")
+
+    shutil.rmtree(temp_extract, ignore_errors=True)
+    print("\n[SUCCESS] Magisk Module '{}' successfully converted and installed!".format(mod_name))
+    print("=================================================================")
+    return True
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: sweet-magisk-converter <module.zip>")
+        sys.exit(1)
+    convert_module(sys.argv[1])

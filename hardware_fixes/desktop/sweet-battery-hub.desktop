@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=33W Power & Battery
+Comment=Monitor 33W Turbo Charging wattage, battery health, and power governors
+Exec=/usr/local/bin/sweet-battery-hub
+Icon=/usr/share/pixmaps/sweet-battery-hub.svg
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;System;
+X-Ubuntu-Touch=true
+Keywords=battery;power;charging;33w;fast charge;turbo;wattage;

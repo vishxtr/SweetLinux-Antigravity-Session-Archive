@@ -1,0 +1,6 @@
+#!/bin/bash
+# SweetLinux VoLTE Hub for Dual SIM (Vi India + Reliance Jio 4G)
+echo "=== SweetLinux Dual SIM VoLTE Provisioning ==="
+echo "SIM 1: Vi India (MCC/MNC 40415) -> VoLTE APN: ims [IPV4V6], Data: portalnmms"
+echo "SIM 2: Reliance Jio 4G (MCC/MNC 405871) -> VoLTE APN: ims [IPV4V6], Data: jionet"
+echo "Status: Active on dual RIL sockets (/dev/socket/rild and /dev/socket/rild2)"

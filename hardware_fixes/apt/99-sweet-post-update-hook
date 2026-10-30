@@ -1,0 +1,1 @@
+DPkg::Post-Invoke { "systemctl enable sweet-gestures.service sweet-audio.service prevent-sod.service sweet-hub-daemon.service remount-rw.service 2>/dev/null || true"; "chmod +x /usr/local/bin/sweet-* /usr/local/bin/rw /usr/local/bin/ro 2>/dev/null || true"; };

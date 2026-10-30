@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=VoLTE & Network Hub
+Comment=Dual-SIM VoLTE HD Voice diagnostics, carrier APN auto-fix, and LTE monitor
+Exec=/usr/local/bin/sweet-volte-hub
+Icon=/usr/share/pixmaps/sweet-volte-hub.svg
+Terminal=false
+Type=Application
+Categories=Settings;Network;Telephony;
+X-Ubuntu-Touch=true
+Keywords=volte;ims;lte;dual-sim;jio;airtel;vi;carrier;4g;

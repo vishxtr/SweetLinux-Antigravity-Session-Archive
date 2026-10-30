@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Play Integrity & Android Hub
+Comment=Play Integrity Device attestation, Magisk Zygisk manager, and module converter
+Exec=/usr/local/bin/sweet-play-integrity-hub
+Icon=/usr/share/pixmaps/sweet-play-integrity.svg
+Terminal=false
+Type=Application
+Categories=Settings;System;Security;
+X-Ubuntu-Touch=true
+Keywords=play integrity;safetynet;magisk;zygisk;banking;android;waydroid;pif;

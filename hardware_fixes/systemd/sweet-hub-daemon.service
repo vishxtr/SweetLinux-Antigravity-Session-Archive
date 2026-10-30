@@ -1,0 +1,15 @@
+[Unit]
+Description=SweetLinux Hardware Hub & Biometric Management Daemon
+After=dbus.service systemd-udevd.service
+Wants=dbus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sweet-hub-daemon
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

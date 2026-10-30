@@ -1,0 +1,2 @@
+#!/bin/sh
+mount -o remount,rw / && echo "RootFS is now READ-WRITE."

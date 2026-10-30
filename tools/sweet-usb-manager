@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SweetLinux USB Gadget & OTG Master Controller
+Target: Xiaomi Redmi Note 10 Pro / Pro Max (sweet / sweetin)
+UDC: a600000.dwc3 | ConfigFS: /sys/kernel/config/usb_gadget/g1
+"""
+
+import sys
+import os
+import subprocess
+import json
+import time
+
+GADGET_DIR = "/sys/kernel/config/usb_gadget/g1"
+UDC_CONTROLLER = "a600000.dwc3"
+FFS_ADB = "/dev/usb-ffs/adb"
+FFS_MTP = "/dev/usb-ffs/mtp"
+
+def run_cmd(cmd):
+    try:
+        res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        return res.returncode, res.stdout.strip()
+    except Exception as e:
+        return 1, str(e)
+
+def write_node(path, val):
+    try:
+        if os.path.exists(path):
+            with open(path, "w") as f:
+                f.write(str(val))
+            return True
+    except Exception:
+        pass
+    return False
+
+def read_node(path):
+    try:
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                return f.read().strip()
+    except Exception:
+        pass
+    return ""
+
+def init_configfs_gadget():
+    """Initializes ConfigFS USB gadget for Snapdragon 732G"""
+    # 1. Mount configfs if needed
+    if not os.path.ismount("/sys/kernel/config"):
+        run_cmd("mount -t configfs none /sys/kernel/config 2>/dev/null")
+
+    # 2. Create g1 gadget
+    os.makedirs(GADGET_DIR, exist_ok=True)
+    os.makedirs(GADGET_DIR + "/strings/0x409", exist_ok=True)
+    os.makedirs(GADGET_DIR + "/configs/b.1/strings/0x409", exist_ok=True)
+
+    # 3. Set USB IDs (Xiaomi MTP/ADB identifiers)
+    write_node(GADGET_DIR + "/idVendor", "0x2717")
+    write_node(GADGET_DIR + "/idProduct", "0xff48")
+    write_node(GADGET_DIR + "/bcdDevice", "0x0414")
+    write_node(GADGET_DIR + "/bcdUSB", "0x0200")
+
+    write_node(GADGET_DIR + "/strings/0x409/manufacturer", "Xiaomi")
+    write_node(GADGET_DIR + "/strings/0x409/product", "Redmi Note 10 Pro (SweetLinux)")
+    write_node(GADGET_DIR + "/strings/0x409/serialnumber", "sweet-cyberneon-01")
+    write_node(GADGET_DIR + "/configs/b.1/strings/0x409/configuration", "SweetLinux Halium Config")
+    write_node(GADGET_DIR + "/configs/b.1/MaxPower", "500")
+
+    # 4. Prepare FunctionFS mountpoints
+    os.makedirs(FFS_ADB, exist_ok=True)
+    os.makedirs(FFS_MTP, exist_ok=True)
+    os.makedirs(GADGET_DIR + "/functions/ffs.adb", exist_ok=True)
+    os.makedirs(GADGET_DIR + "/functions/mtp.gs0", exist_ok=True)
+
+    if not os.path.ismount(FFS_ADB):
+        run_cmd("mount -t functionfs adb " + FFS_ADB + " 2>/dev/null")
+    if not os.path.ismount(FFS_MTP):
+        run_cmd("mount -t functionfs mtp " + FFS_MTP + " 2>/dev/null")
+
+    return True
+
+def set_usb_mode(mode):
+    """Modes: mtp, adb, mtp_adb, rndis, charging"""
+    init_configfs_gadget()
+    
+    # Unbind UDC first to safely reconfigure endpoints
+    write_node(GADGET_DIR + "/UDC", "")
+    time.sleep(0.1)
+
+    # Clean existing linked functions in config
+    cfg_dir = GADGET_DIR + "/configs/b.1"
+    for item in os.listdir(cfg_dir):
+        fp = os.path.join(cfg_dir, item)
+        if os.path.islink(fp):
+            try:
+                os.unlink(fp)
+            except Exception:
+                pass
+
+    resolved_udc = UDC_CONTROLLER
+    # If dynamic UDC is present in /sys/class/udc, pick first
+    if os.path.exists("/sys/class/udc") and os.listdir("/sys/class/udc"):
+        resolved_udc = os.listdir("/sys/class/udc")[0]
+
+    if mode == "mtp":
+        write_node(GADGET_DIR + "/idProduct", "0xff40")
+        os.symlink(GADGET_DIR + "/functions/mtp.gs0", cfg_dir + "/f1")
+    elif mode == "adb":
+        write_node(GADGET_DIR + "/idProduct", "0xff18")
+        os.symlink(GADGET_DIR + "/functions/ffs.adb", cfg_dir + "/f1")
+        run_cmd("systemctl restart android-tools-adbd 2>/dev/null || adbd &")
+    elif mode in ["mtp_adb", "all"]:
+        write_node(GADGET_DIR + "/idProduct", "0xff48")
+        os.symlink(GADGET_DIR + "/functions/mtp.gs0", cfg_dir + "/f1")
+        os.symlink(GADGET_DIR + "/functions/ffs.adb", cfg_dir + "/f2")
+        run_cmd("systemctl restart android-tools-adbd 2>/dev/null || adbd &")
+    elif mode == "rndis":
+        os.makedirs(GADGET_DIR + "/functions/rndis.gs4", exist_ok=True)
+        write_node(GADGET_DIR + "/idProduct", "0xff80")
+        os.symlink(GADGET_DIR + "/functions/rndis.gs4", cfg_dir + "/f1")
+        run_cmd("ifconfig rndis0 192.168.42.1 netmask 255.255.255.0 up 2>/dev/null")
+    elif mode == "charging":
+        # Leave unlinked for pure charging
+        write_node(GADGET_DIR + "/idProduct", "0xff00")
+
+    # Rebind UDC
+    write_node(GADGET_DIR + "/UDC", resolved_udc)
+    return {
+        "status": "success",
+        "mode": mode,
+        "udc": resolved_udc,
+        "idVendor": read_node(GADGET_DIR + "/idVendor"),
+        "idProduct": read_node(GADGET_DIR + "/idProduct")
+    }
+
+def get_usb_status():
+    udc = read_node(GADGET_DIR + "/UDC")
+    vendor = read_node(GADGET_DIR + "/idVendor")
+    prod = read_node(GADGET_DIR + "/idProduct")
+    
+    # OTG Drives check
+    otg_drives = []
+    code, out = run_cmd("lsblk -J -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null")
+    if code == 0 and out:
+        try:
+            d = json.loads(out)
+            for dev in d.get("blockdevices", []):
+                if dev.get("name", "").startswith("sd"):
+                    otg_drives.append(dev)
+        except Exception:
+            pass
+
+    # Type-C Dual Role / VBUS
+    vbus = read_node("/sys/class/power_supply/usb/voltage_now")
+    current = read_node("/sys/class/power_supply/usb/current_now")
+    online = read_node("/sys/class/power_supply/usb/online")
+
+    return {
+        "status": "success",
+        "udc_controller": udc if udc else UDC_CONTROLLER,
+        "connected_to_host": online == "1",
+        "idVendor": vendor,
+        "idProduct": prod,
+        "vbus_uv": vbus if vbus else "5000000",
+        "vbus_ua": current if current else "0",
+        "otg_storage_devices": otg_drives
+    }
+
+def mount_otg_drives():
+    """Auto-mounts any connected USB-OTG mass storage device to /media/phablet"""
+    os.makedirs("/media/phablet", exist_ok=True)
+    code, out = run_cmd("ls /dev/sd[a-z][0-9] 2>/dev/null")
+    mounted = []
+    if code == 0 and out:
+        for part in out.splitlines():
+            label = os.path.basename(part)
+            target = "/media/phablet/" + label
+            os.makedirs(target, exist_ok=True)
+            m_code, _ = run_cmd("mount -o rw,utf8,umask=000 " + part + " " + target)
+            if m_code == 0:
+                mounted.append({"partition": part, "mountpoint": target})
+    return {"status": "success", "mounted": mounted}
+
+def main():
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1].lower()
+        if cmd == "init":
+            print(json.dumps(set_usb_mode("mtp_adb"), indent=2))
+        elif cmd in ["set", "mode"] and len(sys.argv) > 2:
+            print(json.dumps(set_usb_mode(sys.argv[2].lower()), indent=2))
+        elif cmd in ["status", "-s"]:
+            print(json.dumps(get_usb_status(), indent=2))
+        elif cmd in ["otg-mount", "mount"]:
+            print(json.dumps(mount_otg_drives(), indent=2))
+        else:
+            print("Usage: sweet-usb-manager [init | set <mtp|adb|mtp_adb|rndis|charging> | status | otg-mount]")
+        sys.exit(0)
+    
+    # Default without args: report status
+    print(json.dumps(get_usb_status(), indent=2))
+
+if __name__ == "__main__":
+    main()

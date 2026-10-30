@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=108MP Camera Studio
+Comment=Pro Quad-Camera application with 108MP, Ultra-Wide, Macro, and Selfie controls
+Exec=/usr/local/bin/sweet-camera-studio
+Icon=/usr/share/pixmaps/sweet-camera-studio.svg
+Terminal=false
+Type=Application
+Categories=AudioVideo;Camera;Photography;
+X-Ubuntu-Touch=true
+Keywords=camera;photo;108mp;hm2;macro;ultrawide;selfie;video;

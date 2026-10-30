@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Fingerprint Manager
+Comment=Enroll and manage biometric fingerprint security
+Exec=/usr/local/bin/sweet-fingerprint-manager
+Icon=/usr/share/pixmaps/sweet-fingerprint-manager.svg
+Terminal=false
+Type=Application
+Categories=Settings;Security;System;
+X-Ubuntu-Touch=true
+Keywords=fingerprint;biometrics;security;lock;fpc;

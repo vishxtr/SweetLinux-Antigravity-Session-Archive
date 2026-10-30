@@ -1,0 +1,12 @@
+[Unit]
+Description=SweetLinux Native Android Edge Gestures Engine
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sweet-gestures-daemon
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

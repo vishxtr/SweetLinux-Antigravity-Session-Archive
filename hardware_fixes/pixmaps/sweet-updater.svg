@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <linearGradient id="cyanGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f5d4"/>
+      <stop offset="100%" stop-color="#0984e3"/>
+    </linearGradient>
+  </defs>
+  <!-- Background Squircle -->
+  <rect x="8" y="8" width="176" height="176" rx="42" fill="url(#bgGrad)" stroke="#00f5d4" stroke-width="4"/>
+  <!-- Outer Circular Track -->
+  <circle cx="96" cy="96" r="54" fill="none" stroke="#1e293b" stroke-width="10"/>
+  <!-- Sync Arc -->
+  <path d="M 96,42 A 54,54 0 0,1 150,96" fill="none" stroke="url(#cyanGrad)" stroke-width="10" stroke-linecap="round"/>
+  <path d="M 96,150 A 54,54 0 0,1 42,96" fill="none" stroke="url(#cyanGrad)" stroke-width="10" stroke-linecap="round"/>
+  <!-- Arrow Heads -->
+  <polygon points="150,86 160,98 140,98" fill="#00f5d4"/>
+  <polygon points="42,106 32,94 52,94" fill="#00f5d4"/>
+  <!-- Center Shield Icon -->
+  <path d="M 96,68 L 118,78 L 118,100 C 118,116 96,128 96,128 C 96,128 74,116 74,100 L 74,78 Z" fill="#1e293b" stroke="#00f5d4" stroke-width="4"/>
+  <polyline points="88,97 94,103 106,90" fill="none" stroke="#39ff14" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

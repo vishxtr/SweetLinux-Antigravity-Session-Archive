@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SweetLinux System Updater & Maintenance Hub
+Target: Xiaomi Redmi Note 10 Pro / Pro Max (sweet / sweetin)
+"""
+
+import sys
+import os
+import subprocess
+import json
+import time
+
+def run_cmd(cmd):
+    try:
+        res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        return res.returncode, res.stdout.strip()
+    except Exception as e:
+        return 1, str(e)
+
+def get_system_info():
+    info = {
+        "os": "Ubuntu 20.04.5 LTS (Focal Fossa)",
+        "distro": "SweetLinux CyberNeon v1.0",
+        "kernel": os.uname().release,
+        "arch": os.uname().machine,
+        "device": "Xiaomi Redmi Note 10 Pro / Pro Max (sweet)",
+        "halium_version": "10.0",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    return info
+
+def check_updates():
+    print("[SweetUpdater] Querying package repositories...")
+    code, out = run_cmd("apt-get update >/dev/null 2>&1 && apt-get -s -q dist-upgrade | grep '^Inst'")
+    packages = []
+    if out:
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                packages.append(parts[1])
+    return {
+        "status": "success",
+        "updates_available": len(packages),
+        "packages": packages
+    }
+
+def perform_upgrade():
+    print("[SweetUpdater] Initiating safe system upgrade...")
+    cmd = "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get -y --only-upgrade install " + \
+          "$(apt-get -s -q dist-upgrade | grep '^Inst' | awk '{print $2}' | tr '\n' ' ')"
+    code, out = run_cmd(cmd)
+    return {"status": "success" if code == 0 else "error", "output": out}
+
+def clean_system():
+    print("[SweetUpdater] Running system maintenance and cache cleanup...")
+    cmds = [
+        "apt-get clean",
+        "apt-get autoremove -y",
+        "rm -rf /var/tmp/* /tmp/* ~/.cache/thumbnails/* 2>/dev/null",
+        "journalctl --vacuum-size=50M >/dev/null 2>&1 || true"
+    ]
+    for c in cmds:
+        run_cmd(c)
+    return {"status": "success", "message": "Cache cleaned and storage reclaimed"}
+
+def audit_health():
+    tests = {}
+    
+    # Kernel & EAS
+    tests["kernel_eas"] = os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+    
+    # Display 120Hz/60Hz
+    tests["display_kms"] = os.path.exists("/dev/dri/card0") or os.path.exists("/sys/class/drm/card0-DSI-1")
+    
+    # 11-bit Backlight
+    tests["backlight_11bit"] = os.path.exists("/sys/class/backlight/panel0-backlight/brightness")
+    
+    # FPC1020 Fingerprint
+    tests["fingerprint_fpc1020"] = os.path.exists("/dev/fpc1020")
+    
+    # 33W Fast Charger
+    tests["charging_bq2597x"] = os.path.exists("/sys/class/power_supply/battery")
+    
+    # Bolero QDSP6 Audio
+    tests["audio_qdsp6"] = os.path.exists("/proc/asound/cards")
+    
+    # Snapdragon X15 Cellular Modem
+    tests["modem_ipc"] = os.path.exists("/dev/msm_ipc_router")
+    
+    # Waydroid / LXC Container readiness
+    tests["container_binder"] = os.path.exists("/dev/binder")
+    tests["container_overlayfs"] = os.path.exists("/proc/filesystems") and "overlay" in open("/proc/filesystems").read()
+    
+    return {
+        "status": "success",
+        "health": tests,
+        "overall_score": "{0}/{1} Subsystems Online".format(sum(1 for v in tests.values() if v), len(tests))
+    }
+
+def main():
+    if len(sys.argv) > 1:
+        arg = sys.argv[1].lower()
+        if arg in ["--check", "-c", "check"]:
+            print(json.dumps(check_updates(), indent=2))
+        elif arg in ["--upgrade", "-u", "upgrade"]:
+            print(json.dumps(perform_upgrade(), indent=2))
+        elif arg in ["--clean", "clean"]:
+            print(json.dumps(clean_system(), indent=2))
+        elif arg in ["--health", "health"]:
+            print(json.dumps(audit_health(), indent=2))
+        elif arg in ["--info", "info"]:
+            print(json.dumps(get_system_info(), indent=2))
+        else:
+            print("Usage: sweet-system-updater [--check | --upgrade | --clean | --health | --info]")
+        sys.exit(0)
+    
+    # Launch QML UI
+    qml_path = "/usr/share/sweet/qml/SystemUpdater.qml"
+    if os.path.exists(qml_path):
+        os.environ["QT_QPA_PLATFORM"] = "ubuntumirclient"
+        os.environ["GRID_UNIT_PX"] = "24"
+        os.execv("/usr/bin/qmlscene", ["qmlscene", qml_path])
+    else:
+        print("[!] QML UI not found at {0}, running CLI status:".format(qml_path))
+        print(json.dumps(get_system_info(), indent=2))
+
+if __name__ == "__main__":
+    main()

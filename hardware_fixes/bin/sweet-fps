@@ -1,0 +1,86 @@
+#!/bin/sh
+# SweetLinux Adaptive Refresh Rate Manager
+# Auto-detects OEM Samsung AMOLED vs Replacement LCD to ensure optimal refresh rate
+
+STATE_FILE="/etc/default/sweet-fps"
+PANEL_TYPE_FILE="/etc/default/sweet-panel-type"
+
+# Ensure directory is writable or use fallback in Android environment
+if ! mkdir -p /etc/default 2>/dev/null; then
+    mkdir -p /data/sweetlinux/etc/default 2>/dev/null || mkdir -p /data/local/tmp 2>/dev/null
+    if [ -d "/data/sweetlinux/etc/default" ]; then
+        STATE_FILE="/data/sweetlinux/etc/default/sweet-fps"
+        PANEL_TYPE_FILE="/data/sweetlinux/etc/default/sweet-panel-type"
+    else
+        STATE_FILE="/data/local/tmp/sweet-fps"
+        PANEL_TYPE_FILE="/data/local/tmp/sweet-panel-type"
+    fi
+fi
+
+# Auto-detect panel: OEM AMOLED vs replacement LCD
+IS_LCD=0
+if [ -f "$PANEL_TYPE_FILE" ]; then
+    if grep -iq "lcd" "$PANEL_TYPE_FILE" 2>/dev/null; then
+        IS_LCD=1
+    elif grep -iq "amoled" "$PANEL_TYPE_FILE" 2>/dev/null; then
+        IS_LCD=0
+    fi
+elif [ -e "/sys/class/leds/lcd-backlight" ] || [ -f "/etc/default/sweet-lcd" ]; then
+    IS_LCD=1
+fi
+
+# Detect DSI panel vendor from sysfs panel_info
+for pnode in /sys/devices/platform/soc/ae00000.qcom,mdss_mdp/drm/card0/card0-DSI-1/panel_info \
+             /sys/class/drm/card0-DSI-1/panel_info \
+             /sys/devices/virtual/graphics/fb0/msm_fb_panel_info; do
+    if [ -f "$pnode" ]; then
+        if grep -iqE "lcd|tianma|huaxing|boe|ft8719|nt36" "$pnode" 2>/dev/null; then
+            IS_LCD=1
+        elif grep -iqE "dsi_k6_38_0c_0a_fhd_dsc_video|samsung|ea8076" "$pnode" 2>/dev/null; then
+            IS_LCD=0
+        fi
+    fi
+done
+
+REQ_FPS="${1}"
+
+if [ "$IS_LCD" -eq 1 ]; then
+    # Replacement LCD panels MUST stay on rock-solid 60Hz.
+    TARGET_FPS=60
+    echo "lcd" > "$PANEL_TYPE_FILE"
+    echo "[sweet-fps] Replacement LCD panel detected -> Enforcing stable 60Hz mode."
+else
+    # OEM AMOLED panel logic (Supports 120Hz and 60Hz)
+    TARGET_FPS="${REQ_FPS:-120}"
+    if [ "$TARGET_FPS" != "60" ] && [ "$TARGET_FPS" != "120" ]; then
+        TARGET_FPS=120
+    fi
+    echo "amoled" > "$PANEL_TYPE_FILE"
+    echo "[sweet-fps] OEM Samsung AMOLED panel active -> Setting ${TARGET_FPS}Hz mode."
+fi
+
+echo "$TARGET_FPS" > "$STATE_FILE"
+
+# Keep Qualcomm MDSS CRTC fps_periodicity_ms at stable standard (1000ms measurement window)
+for node in /sys/devices/platform/soc/ae00000.qcom,mdss_mdp/drm/card0/sde-crtc-*/fps_periodicity_ms; do
+    if [ -f "$node" ]; then
+        echo 1000 > "$node" 2>/dev/null || true
+    fi
+done
+
+# If SurfaceFlinger is running, dynamically update display mode if possible
+if command -v service >/dev/null 2>&1; then
+    if [ "$TARGET_FPS" = "120" ]; then
+        service call SurfaceFlinger 1035 i32 1 >/dev/null 2>&1 || true
+    else
+        service call SurfaceFlinger 1035 i32 2 >/dev/null 2>&1 || true
+    fi
+fi
+
+# Synchronize with Mir / Lomiri display config if file exists
+if [ -f "/etc/ubuntu-touch/display.conf" ]; then
+    sed -i "s/RefreshRate=[0-9]*/RefreshRate=${TARGET_FPS}/g" /etc/ubuntu-touch/display.conf 2>/dev/null || true
+fi
+
+exit 0
+

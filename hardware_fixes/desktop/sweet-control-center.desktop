@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=SweetLinux Control Center
+Comment=Master unified hardware dashboard for Redmi Note 10 Pro
+Exec=/usr/local/bin/sweet-control-center
+Icon=/usr/share/pixmaps/sweet-control-center.svg
+Terminal=false
+Type=Application
+Categories=Settings;System;
+X-Ubuntu-Touch=true
+Keywords=control center;settings;system;hardware;sweet;
